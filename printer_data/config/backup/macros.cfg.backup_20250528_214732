@@ -1,0 +1,139 @@
+# TODO:
+# ;===== for Textured PEI Plate , lower the nozzle as the nozzle was touching topmost of the texture when homing ==
+#;curr_bed_type={curr_bed_type}
+#{if curr_bed_type=="Textured PEI Plate"}
+#G29.1 Z{-0.04} ; for Textured PEI Plate
+#{endif}
+
+[gcode_macro CENTER]
+description: Move the toolhead to the center of objects to be printed, or center of build plate
+gcode:
+    {% set center_x = printer.toolhead.axis_maximum.x / 2 | float %}
+    {% set center_y = printer.toolhead.axis_maximum.y / 2 | float %}
+    {% set all_points = printer.exclude_object.objects | map(attribute='polygon') | sum(start=[]) %}
+    {% set x_min = all_points | map(attribute=0) | min | default(center_x) %}
+    {% set y_min = all_points | map(attribute=1) | min | default(center_y) %}
+    {% set x_max = all_points | map(attribute=0) | max | default(center_x) %}
+    {% set y_max = all_points | map(attribute=1) | max | default(center_y) %}
+    {% set travel_speed = (printer.toolhead.max_velocity) * 30 | float %}
+
+    {% set center_x = (x_min + x_max) / 2.0 | round(1) %}
+    {% set center_y = (y_min + y_max) / 2.0 | round(1) %}
+
+    SAVE_GCODE_STATE NAME=Pre_Center_State
+    G90
+    G0 X{center_x} Y{center_y} F{travel_speed}
+    M400
+    RESTORE_GCODE_STATE NAME=Pre_Center_State
+
+[delayed_gcode EXHAUST_FAN_OFF]
+gcode:
+    SET_FAN_SPEED FAN=exhaust_fan SPEED=0
+
+[gcode_macro _ALL_FAN_OFF]
+gcode:
+    M106 S0
+    M107
+    #UPDATE_DELAYED_GCODE ID=EXHAUST_FAN_OFF DURATION=120
+
+[gcode_macro _REQUIRE_HOMED]
+gcode:
+    {% if printer.toolhead.homed_axes != "xyz" %}
+      STATUS_HOMING
+      G28
+      SATUS_READY
+    {% endif %}
+
+# cleans the nozzle without turning off the heater at the end
+[gcode_macro _CLEAN_NOZZLE]
+gcode:
+    {% set pad_x_start = 305 %}
+    {% set pad_x_end = 340 %}
+    {% set pad_y_mid = 358 %}
+    {% set pad_wipe_z = 2.0 %}
+    {% set temp = params.TEMP|default("200")|int %}
+
+    _REQUIRE_HOMED
+
+    SAVE_GCODE_STATE NAME=Pre_Clean_State
+    G90 # absolute
+
+    G1 X{pad_x_start} Y{pad_y_mid} Z10 F9000   # to start position
+    {% if printer.extruder.target < temp %}
+        M117 Nozzle heating...
+        M109 S{temp}
+    {% endif %}
+
+    M117 Cleaning...
+    M106 S127   # fan to 50%
+    G1 Z{pad_wipe_z} F300      # drop down to wiping height
+    G1 X{pad_x_end + 5} F4500  # move just past the end of the pad
+    {% for wipes in range(5) %}
+        G1 Y{pad_y_mid} X{pad_x_start}
+        G1 Y{pad_y_mid} X{pad_x_end}
+    {% endfor %}
+    G1 Z{pad_wipe_z + 5.0}   # lift
+    G1 Z{pad_wipe_z} # back down
+    # Z pattern
+    {% for wipes in range(5) %}
+      {% for zig in range(10) %}
+        G1 Y{pad_y_mid+2} X{zig*2 + pad_x_start + 5}
+        G1 Y{pad_y_mid-1} X{zig*2 + pad_x_start}
+      {% endfor %}
+    {% endfor %}
+    G1 Z10 F300 # lift
+    M117 Cleaning done.
+    M400   # finish moves
+    M107   # fan off
+    RESTORE_GCODE_STATE NAME=Pre_Clean_State
+
+[gcode_macro CLEAN_NOZZLE]
+description: Clean the nozzle on the cleaning pad.
+gcode:
+    _REQUIRE_HOMED
+    {% if not printer.quad_gantry_level.applied %}
+       QUAD_GANTRY_LEVEL
+    {% endif %}
+    _CLEAN_NOZZLE
+    M104 S0 # Turn off hotend
+
+[gcode_macro QUAD_GANTRY_LEVEL]
+rename_existing: _QUAD_GANTRY_LEVEL
+gcode:
+    {% if printer.toolhead.homed_axes != "xyz" %}
+       G28
+    {% endif %}
+    SAVE_GCODE_STATE NAME=STATE_QGL
+    BED_MESH_CLEAR
+    {% if not printer.quad_gantry_level.applied %}
+    _QUAD_GANTRY_LEVEL HORIZONTAL_MOVE_Z=5 RETRY_TOLERANCE=1       
+    {% endif %}
+    _QUAD_GANTRY_LEVEL
+    G28 Z
+    RESTORE_GCODE_STATE NAME=STATE_QGL
+
+# G34 is Marlin QGL for compat?
+[gcode_macro G34]
+gcode:
+    QUAD_GANTRY_LEVEL 
+
+[gcode_macro UNSAFE_RAISE_TOOL]
+description: Raise the toolhead 10mm without homing
+gcode:
+    G90
+    SET_KINEMATIC_POSITION Z=0
+    G0 Z10 F600
+    M84
+
+[gcode_macro UNSAFE_LOWER_TOOL]
+description: Raise the toolhead 10mm without homing
+gcode:
+    G90
+    SET_KINEMATIC_POSITION Z=10
+    G0 Z0 F600
+    M84
+
+[gcode_macro URT]
+description: I am tired of typing the long thing
+gcode:
+    UNSAFE_RAISE_TOOL
