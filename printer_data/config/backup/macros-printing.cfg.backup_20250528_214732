@@ -1,0 +1,131 @@
+#
+# Start, End, Cancel print macros
+#
+
+[gcode_macro START_PRINT]
+gcode:
+  {% set target_bed = params.BED|int %}
+  {% set target_extruder = params.EXTRUDER|int %}
+  {% set target_chamber = params.CHAMBER|default("40")|int %}
+  {% set low_temp_bed_soak_min = params.LOW_TEMP_SOAK_MIN|default("0")|int %}
+  {% set high_temp_bed_soak_min = params.HIGH_TEMP_SOAK_MIN|default("25")|int %}
+  {% set x_wait = printer.toolhead.axis_maximum.x|float / 2 %}
+  {% set y_wait = printer.toolhead.axis_maximum.y|float / 2 %}
+  {% set have_chamber_thermistor = False %}
+
+  _REQUIRE_HOMED
+
+  G90
+  SMART_PARK
+
+  CLEAR_PAUSE
+  BED_MESH_CLEAR
+
+  # Checks if the bed temp is higher than 90c - if so then trigger a heatsoak.
+  STATUS_HEATING
+  {% if target_bed > 90 %}
+    M106 S255 # Part fan
+    #SET_PIN PIN=nevermore VALUE=1 # Turn on chamber fan
+    M190 S{target_bed}
+    {% if have_chamber_thermistor %}
+      SET_DISPLAY_TEXT MSG="Bed to {target_chamber}C"
+      TEMPERATURE_WAIT SENSOR="temperature_sensor chamber" MINIMUM={target_chamber}   # Waits for chamber to reach desired temp
+    {% else %}
+      SET_DISPLAY_TEXT MSG="Soak: {high_temp_bed_soak_min}m @ {target_bed}C"
+      G4 P{ high_temp_bed_soak_min * 60000 }
+    {% endif %}
+  {% else %}
+    SET_DISPLAY_TEXT MSG="Bed to {target_bed}C"
+    M190 S{target_bed}
+    SET_DISPLAY_TEXT MSG="Soak: {low_temp_bed_soak_min}m @ {target_bed}C"
+    G4 P{ low_temp_bed_soak_min * 60000 }
+  {% endif %}
+
+  STATUS_LEVELING
+  QUAD_GANTRY_LEVEL
+
+  # First clean at low temp
+  STATUS_CLEANING
+  _CLEAN_NOZZLE TEMP=150
+
+  # Home Z again after QGL and cleaning
+  STATUS_HOMING
+  G28 Z
+
+  SET_DISPLAY_TEXT MSG="Tappy tap"
+  CENTER # this is center of parts during a print
+  PROBE_EDDY_NG_TAP
+
+  STATUS_MESHING
+  BED_MESH_CALIBRATE ADAPTIVE=1 METHOD=RAPID_SCAN
+
+  STATUS_READY
+  SMART_PARK
+
+  # Heats up the nozzle up to target via data from slicer
+  SET_DISPLAY_TEXT MSG="Hotend: {target_extruder}C"
+  STATUS_HEATING
+  M107  # Turns off partcooling fan
+  M109 S{target_extruder}  # Heats the nozzle to printing temp
+
+  STATUS_PRINTING
+  LINE_PURGE
+
+[gcode_macro END_PRINT]
+gcode:
+  {% set min_x = printer.toolhead.axis_minimum.x | float %}
+  {% set max_y = printer.toolhead.axis_maximum.y | float %}
+  {% set max_z = printer.toolhead.axis_maximum.z | float %}
+
+  {% set e_mintemp  = printer.configfile.settings['extruder'].min_extrude_temp %}
+
+  {% set z_hop_safe = [15.0, max_z-printer.toolhead.position.z] | min %}
+  M400 ; wait for buffer to clear
+  G91 ; relative positioning
+  G0 Z{z_hop_safe} F3600 ; move nozzle up
+  G92 E0 ; zero the extruder
+  G1 E-10.0 F2000 ; retract filament
+  G90 ; absolute positioning
+  G1 X{min_x} Y{max_y} F9000 ; move nozzle to top left
+  G92 E0 ; zero extruder again
+  G1 E-5.0 F300 ; retract a bit more, slowly, to avoid dribbles
+  M104 S0 ; turn off hotend
+  M140 S0 ; turn off bed
+  _ALL_FAN_OFF
+  M84 ; Disable all steppers
+  
+  PROBE_EDDY_NG_SET_TAP_OFFSET VALUE=0.0
+  #BED_MESH_CLEAR
+  
+  STATUS_READY
+
+[gcode_macro CANCEL_PRINT]
+description: 
+rename_existing: CANCEL_PRINT_BASE
+gcode:
+  {% set min_x = printer.toolhead.axis_minimum.x | float %}
+  {% set max_y = printer.toolhead.axis_maximum.y | float %}
+  {% set max_z = printer.toolhead.axis_maximum.z | float %}
+  {% set z_hop_safe = [15.0, max_z-printer.toolhead.position.z] | min %}
+  {% set e_restract = 10.0|float %}
+  {% set e_mintemp = printer.configfile.settings['extruder'].min_extrude_temp %}
+
+  M117 Cancelling...
+  CANCEL_PRINT_BASE
+
+  G91 # relative
+  {% if printer.extruder.temperature >= e_mintemp %}
+    G1 E-{e_restract} F500
+  {% endif %}
+  G0 Z{z_hop_safe} F3600 ; move nozzle up
+
+  G90
+  G1 X{min_x} Y{max_y} F9000
+
+  TURN_OFF_HEATERS
+  _ALL_FAN_OFF
+  CLEAR_PAUSE
+  M84
+
+  M117 Print cancelled.
+  {action_respond_info("Print cancelled.")}
